@@ -98,9 +98,9 @@ const char *eventStrings[] = { "playing", "paused", "loading", "stopped" };
 "<plist version=\"1.0\">\r\n"\
 "<dict>\r\n"\
 "<key>width</key>\r\n"\
-"<integer>1280</integer>\r\n"\
+"<integer>1920</integer>\r\n"\
 "<key>height</key>\r\n"\
-"<integer>720</integer>\r\n"\
+"<integer>1080</integer>\r\n"\
 "<key>version</key>\r\n"\
 "<string>110.92</string>\r\n"\
 "</dict>\r\n"\

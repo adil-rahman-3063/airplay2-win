@@ -7,6 +7,10 @@
 #undef main 
 #include "CAirServer.h"
 
+extern "C" {
+#include <libswscale/swscale.h>
+}
+
 typedef void sdlAudioCallback(void* userdata, Uint8* stream, int len);
 
 typedef struct SDemoAudioFrame {
@@ -58,5 +62,13 @@ public:
 
 	CAirServer m_server;
 	float m_fRatio;
+	int m_nOriginalWidth;
+	int m_nOriginalHeight;
+
+	// Bicubic scaler (runs on decoder thread only)
+	SwsContext* m_pSwsCtx;
+	uint8_t* m_pScaledBuf;
+	int m_nScaledWidth;
+	int m_nScaledHeight;
 };
 

@@ -30,6 +30,12 @@ CSDLPlayer::CSDLPlayer()
 	, m_rect()
 	, m_server()
 	, m_fRatio(1.0f)
+	, m_nOriginalWidth(0)
+	, m_nOriginalHeight(0)
+	, m_pSwsCtx(NULL)
+	, m_pScaledBuf(NULL)
+	, m_nScaledWidth(0)
+	, m_nScaledHeight(0)
 {
 	ZeroMemory(&m_sAudioFmt, sizeof(SFgAudioFrame));
 	ZeroMemory(&m_rect, sizeof(SDL_Rect));
@@ -71,6 +77,21 @@ bool CSDLPlayer::init()
 
 void CSDLPlayer::unInit()
 {
+	m_nOriginalWidth = 0;
+	m_nOriginalHeight = 0;
+	m_fRatio = 1.0f;
+
+	if (m_pSwsCtx) {
+		sws_freeContext(m_pSwsCtx);
+		m_pSwsCtx = NULL;
+	}
+	if (m_pScaledBuf) {
+		delete[] m_pScaledBuf;
+		m_pScaledBuf = NULL;
+	}
+	m_nScaledWidth = 0;
+	m_nScaledHeight = 0;
+
 	unInitVideo();
 	unInitAudio();
 
@@ -89,11 +110,17 @@ void CSDLPlayer::loopEvents()
 			if (event.user.code == VIDEO_SIZE_CHANGED_CODE) {
 				unsigned int width = (unsigned int)event.user.data1;
 				unsigned int height = (unsigned int)event.user.data2;
-				if (width != m_rect.w || height != m_rect.h || m_yuv == NULL) {
+				printf("AirPlay Video Stream Resolution: %dx%d\n", width, height);
+				if (m_surface == NULL || m_yuv == NULL || width != m_yuv->w || height != m_yuv->h) {
 					unInitVideo();
 					initVideo(width, height);
 				}
 			}
+			break;
+		}
+		case SDL_VIDEORESIZE: {
+			m_surface = SDL_SetVideoMode(event.resize.w, event.resize.h, 0, SDL_SWSURFACE | SDL_RESIZABLE);
+			SDL_FillRect(m_surface, NULL, 0);
 			break;
 		}
 		case SDL_VIDEOEXPOSE: {
@@ -159,7 +186,76 @@ void CSDLPlayer::outputVideo(SFgVideoFrame* data)
 		return;
 	}
 
-	if (data->width != m_rect.w || data->height != m_rect.h) {
+	if (m_surface == NULL) {
+		return;
+	}
+
+	// Compute the target scaled dimensions to fit the current window
+	float aspect = (float)data->width / data->height;
+	int target_w = m_surface->w;
+	int target_h = (int)(target_w / aspect);
+	if (target_h > m_surface->h) {
+		target_h = m_surface->h;
+		target_w = (int)(target_h * aspect);
+	}
+	// Ensure even dimensions for YUV420
+	target_w &= ~1;
+	target_h &= ~1;
+	if (target_w <= 0 || target_h <= 0) return;
+
+	// Recreate SwsContext if source or target dimensions changed
+	if (m_nScaledWidth != target_w || m_nScaledHeight != target_h) {
+		if (m_pSwsCtx) {
+			sws_freeContext(m_pSwsCtx);
+			m_pSwsCtx = NULL;
+		}
+		if (m_pScaledBuf) {
+			delete[] m_pScaledBuf;
+			m_pScaledBuf = NULL;
+		}
+		m_nScaledWidth = target_w;
+		m_nScaledHeight = target_h;
+	}
+
+	if (!m_pSwsCtx) {
+		m_pSwsCtx = sws_getContext(
+			data->width, data->height, AV_PIX_FMT_YUV420P,
+			target_w, target_h, AV_PIX_FMT_YUV420P,
+			SWS_BICUBIC, NULL, NULL, NULL);
+		if (!m_pSwsCtx) return;
+	}
+
+	// Allocate scaled buffer if needed
+	int scaledYPitch = ((target_w + 15) >> 4) << 4;
+	int scaledUVPitch = (((target_w >> 1) + 15) >> 4) << 4;
+	int scaledYSize = scaledYPitch * target_h;
+	int scaledUVSize = scaledUVPitch * (target_h >> 1);
+	int totalScaledSize = scaledYSize + scaledUVSize * 2;
+	if (!m_pScaledBuf) {
+		m_pScaledBuf = new uint8_t[totalScaledSize];
+	}
+
+	// Set up source pointers and strides from the incoming frame
+	const uint8_t* srcSlice[3] = {
+		data->data,
+		data->data + data->dataLen[0],
+		data->data + data->dataLen[0] + data->dataLen[1]
+	};
+	int srcStride[3] = { (int)data->pitch[0], (int)data->pitch[1], (int)data->pitch[2] };
+
+	// Set up destination pointers and strides for the scaled buffer
+	uint8_t* dstSlice[3] = {
+		m_pScaledBuf,
+		m_pScaledBuf + scaledYSize,
+		m_pScaledBuf + scaledYSize + scaledUVSize
+	};
+	int dstStride[3] = { scaledYPitch, scaledUVPitch, scaledUVPitch };
+
+	// Bicubic scale!
+	sws_scale(m_pSwsCtx, srcSlice, srcStride, 0, data->height, dstSlice, dstStride);
+
+	// Now check if the YUV overlay matches the scaled dimensions
+	if (m_yuv == NULL || target_w != m_yuv->w || target_h != m_yuv->h) {
 		{
 			CAutoLock oLock(m_mutexVideo, "unInitVideo");
 			if (NULL != m_yuv) {
@@ -170,8 +266,8 @@ void CSDLPlayer::outputVideo(SFgVideoFrame* data)
 		m_evtVideoSizeChange.type = SDL_USEREVENT;
 		m_evtVideoSizeChange.user.type = SDL_USEREVENT;
 		m_evtVideoSizeChange.user.code = VIDEO_SIZE_CHANGED_CODE;
-		m_evtVideoSizeChange.user.data1 = (void*)data->width;
-		m_evtVideoSizeChange.user.data2 = (void*)data->height;
+		m_evtVideoSizeChange.user.data1 = (void*)(uintptr_t)target_w;
+		m_evtVideoSizeChange.user.data2 = (void*)(uintptr_t)target_h;
 
 		SDL_PushEvent(&m_evtVideoSizeChange);
 		return;
@@ -184,27 +280,27 @@ void CSDLPlayer::outputVideo(SFgVideoFrame* data)
 
 	SDL_LockYUVOverlay(m_yuv);
 
-	for (size_t i = 0; i < data->height; i++)
-	{
-		if (i >= m_yuv->h) {
-			break;
-		}
-		memcpy(m_yuv->pixels[0] + i * m_yuv->pitches[0], data->data + i * data->pitch[0], min(m_yuv->pitches[0], data->pitch[0]));
+	// Copy scaled YUV data into the overlay
+	for (int i = 0; i < target_h; i++) {
+		memcpy(m_yuv->pixels[0] + i * m_yuv->pitches[0],
+			dstSlice[0] + i * scaledYPitch, min((int)m_yuv->pitches[0], scaledYPitch));
 		if (i % 2 == 0) {
-			memcpy(m_yuv->pixels[1] + (i >> 1)* m_yuv->pitches[1],
-				data->data + data->dataLen[0] + (i >> 1)* data->pitch[1], min(m_yuv->pitches[1], data->pitch[1]));
-			memcpy(m_yuv->pixels[2] + (i >> 1)* m_yuv->pitches[2],
-				data->data + data->dataLen[0] + data->dataLen[1] + (i >> 1)* data->pitch[2], min(m_yuv->pitches[2], data->pitch[2]));
+			memcpy(m_yuv->pixels[1] + (i >> 1) * m_yuv->pitches[1],
+				dstSlice[1] + (i >> 1) * scaledUVPitch, min((int)m_yuv->pitches[1], scaledUVPitch));
+			memcpy(m_yuv->pixels[2] + (i >> 1) * m_yuv->pitches[2],
+				dstSlice[2] + (i >> 1) * scaledUVPitch, min((int)m_yuv->pitches[2], scaledUVPitch));
 		}
 	}
 
 	SDL_UnlockYUVOverlay(m_yuv);
 
-	m_rect.x = 0;
-	m_rect.y = 0;
-	m_rect.w = data->width;
-	m_rect.h = data->height;
+	// Display 1:1 centered in the window
+	m_rect.x = (m_surface->w - target_w) / 2;
+	m_rect.y = (m_surface->h - target_h) / 2;
+	m_rect.w = target_w;
+	m_rect.h = target_h;
 
+	SDL_FillRect(m_surface, NULL, 0);
 	SDL_DisplayYUVOverlay(m_yuv, &m_rect);
 }
 
@@ -237,21 +333,25 @@ void CSDLPlayer::outputAudio(SFgAudioFrame* data)
 
 void CSDLPlayer::initVideo(int width, int height)
 {
-	// 0x115
-	m_surface = SDL_SetVideoMode(width, height, 0, SDL_SWSURFACE);
+	int win_width = width;
+	int win_height = height;
+	m_surface = SDL_SetVideoMode(win_width, win_height, 0, SDL_SWSURFACE | SDL_RESIZABLE);
 	SDL_WM_SetCaption("AirPlay Demo [s - start server, q - stop server]", NULL);
 
 	{
 		CAutoLock oLock(m_mutexVideo, "initVideo");
-		m_yuv = SDL_CreateYUVOverlay(width, height, SDL_IYUV_OVERLAY, m_surface);
+		// Create the YUV overlay at the WINDOW size (scaled size)
+		// so SDL displays it 1:1 with no additional scaling
+		m_yuv = SDL_CreateYUVOverlay(win_width, win_height, SDL_IYUV_OVERLAY, m_surface);
 
 		memset(m_yuv->pixels[0], 0, m_yuv->pitches[0] * m_yuv->h);
 		memset(m_yuv->pixels[1], 128, m_yuv->pitches[1] * m_yuv->h >> 1);
 		memset(m_yuv->pixels[2], 128, m_yuv->pitches[2] * m_yuv->h >> 1);
+
 		m_rect.x = 0;
 		m_rect.y = 0;
-		m_rect.w = width;
-		m_rect.h = height;
+		m_rect.w = win_width;
+		m_rect.h = win_height;
 
 		SDL_DisplayYUVOverlay(m_yuv, &m_rect);
 	}

@@ -1,4 +1,4 @@
-﻿// airplay-dll-demo.cpp : 此文件包含 "main" 函数。程序执行将在此处开始并结束。
+// airplay-dll-demo.cpp : 此文件包含 "main" 函数。程序执行将在此处开始并结束。
 //
 #include <windows.h>
 #include <iostream>
@@ -11,7 +11,11 @@ int main()
 {
     _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 
-    printf("Usage: \n [s] to start server\n [q] to stop\n [-] and [=] to scale video size.\n\n");
+    printf("Usage:\n"
+           "  Make sure the AirPlay window (SDL window) has focus, then press:\n"
+           "  [s] to start server\n"
+           "  [q] to stop server / quit\n"
+           "  [-] and [=] to scale video size.\n\n");
 
     CSDLPlayer player;
     player.init();
